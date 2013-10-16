@@ -51,9 +51,6 @@ def init_config():
     try:
         cfg.readfp(open(cfg_file))
     except Exception:
-        # let this go up the stack so it ends up in the event viewer
-        # then exit
-        raise
         sys.exit(-1)
     return cfg
 
@@ -69,17 +66,21 @@ class MetricWorkCls(object):
             self.interval = cfg.getint('MAIN','interval')
         except ConfigParser.Error:
             pass
+        self.conv_tbl = maketrans(' .','__')
 
-    def is_time_ready(self, ):
+    def timeToWait(self, ):
+        """Returns time to wait for next metric poll"""
         time_passed = time.time() - self.last_poll_time
+
+        # Time since last poll has exceeded interval_time; don't wait, poll now
         if time_passed > self.interval:
-            return True
-        return False
+            return 0
+        return self.interval - time_passed
 
     def sanitize_path(self, path):
-        conv_tbl = maketrans(' .','__')
+        """Sanitize path names to be carbon ready"""
         path.strip()
-        path = path.translate(conv_tbl, '*')
+        path = path.translate(self.conv_tbl, '*')
         return path
 
     def getName(self, ):
@@ -233,7 +234,9 @@ class MetricReadCls_uptime(MetricWorkCls):
 class MetricWriteCls_graphite(MetricWorkCls):
 
     name = 'graphite'
-    last_connect_t = 0
+    backoff_delay = 30
+    backoff = 0
+    sock = None
 
     def __init__(self, ):
 
@@ -255,23 +258,32 @@ class MetricWriteCls_graphite(MetricWorkCls):
             sys.exit(-1)
 
         self.instance_path = self.prefix + self.fqdn.replace('.', '_') + '.'
-        self.connect()
         super(MetricWriteCls_graphite, self).__init__()
 
     def connect(self, ):
-        if time.time() - self.last_connect_t > 15:
-            logger.info('Opening sock to %s:%s' % (self.graphite_server, self.graphite_port))
-            try:
-                self.last_connect_t = time.time()
-                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.sock.connect((self.graphite_server, self.graphite_port))
-            except:
-                logger.error('Unable to connect to %s:%s' % (self.graphite_server, self.graphite_port))
-                logger.error(traceback.format_exc())
+        """
+        Initialize sockect and establish connection.  If socket
+        already exists, then close existing socket and re-establish
+        a new socket and connection
+        """
+        if self.sock:
+            self.sock.close()
+            self.sock = None
+
+        logger.info('Opening sock to %s:%s' % (self.graphite_server, self.graphite_port))
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.connect((self.graphite_server, self.graphite_port))
+        except:
+            logger.error('Unable to connect to %s:%s' % (self.graphite_server, self.graphite_port))
+            logger.error(traceback.format_exc())
 
 
     def write_metric(self, metric_tpl):
         metric_line = self.format_plaintxt(metric_tpl)
+
+        # We drop metrics if they fail to send.  This prevents
+        # the graphite/carbon server from being pounded
         self.send_metric(metric_line)
 
     def format_plaintxt(self, metric_tpl):
@@ -280,35 +292,60 @@ class MetricWriteCls_graphite(MetricWorkCls):
         return '%s %f %d\n' % (metric_path, metric, timestamp)
 
     def send_metric(self, metric_line):
+        """
+        This method takes a single line plaintxt formatted metric
+        and attempts to send it via tcp.  If the socket isn't initialized
+        it will call the connect method to establish a connection.  Any
+        socket errors will cause the socket to be closed and re-established
+        before a retry.  3 attempts will be made before giving up, setting a
+        backoff timer for 10 secs and returning the backoff timer in secs.
+        Subsquent calls will return time left (in secs) on the back off timer
+        to allow the calling method to decide whether to wait and requeue the
+        failed metric for sending or drop the metric.  If a send is successful,
+        None is returned.
+        """
+
         logger.debug('Sending %s' % (metric_line))
         retries = 0
-        while retries < 3:
+
+        # Return seconds left on backoff timer
+        if self.backoff > time.time():
+            return self.backoff - time.time()
+
+        # Make sure connection is established
+        if not self.sock:
+            self.connect()
+
+        while retries < 2:
             try:
                 self.sock.sendall(metric_line)
             except socket.timeout:
                 retries += 1
             except socket.error:
-                self.sock.close()
-                self.connect()
                 retries += 1
+                # Reinitialize socket and establish new connection
+                self.connect()
             else:
-                # Send was successful
-                break
+                # Send was successful; Return None
+                return None
+
+        # Send failed after retries, set and return backoff timer
+        self.backoff = time.time() + self.backoff_delay
+        return self.backoff_delay
 
     def teardown(self, ):
         logger.info('Closing socket to graphite server')
-        self.sock.close
+        if self.sock:
+            self.sock.close()
 
 
 class MetricWorkThread(threading.Thread):
 
-    # default thread sleep time
-    thread_sleep_t = 1
 
 
     def __init__(self, metrics_queue, start_delay, work_obj):
         super(MetricWorkThread, self).__init__()
-        self.stopevent = threading.Event()
+        self.stop_event = threading.Event()
         self.metrics_queue = metrics_queue
         self.start_delay = start_delay
         self.work_obj = work_obj
@@ -323,16 +360,15 @@ class MetricWorkThread(threading.Thread):
 
     def run(self, ):
         time.sleep(self.start_delay)
-        while not self.stopevent.isSet():
-            self._workload()
-            time.sleep(self.thread_sleep_t)
-        self._teardown()
-        logger.info('%s died gracefully' % (self.name))
 
-    def join(self, timeout=None):
-        logger.info('Requesting %s die' % (self.name))
-        self.stopevent.set()
-        super(MetricWorkThread, self).join(timeout)
+        # Execute main workload method and then teardown
+        # We also catch any raised errors and log the traceback
+        try:
+            self._workload()
+            self._teardown()
+        except:
+            logger.error(traceback.format_exc())
+        logger.info('%s died gracefully' % (self.name))
 
     def _workload(self, ):
         raise NotImplementedError
@@ -342,37 +378,56 @@ class MetricWorkThread(threading.Thread):
 
 
 class MetricReader(MetricWorkThread):
+    """ Reader Thread """
 
     def _workload(self, ):
-        if  self.work_obj.is_time_ready():
+        """
+        Loop reading metrics from work objects and wait on time returned
+        by work objects timeToWait() method
+        """
+
+        while not self.stop_event.wait(self.work_obj.timeToWait()):
             for metric_tuple in self.work_obj.get_metric():
                 logger.debug(
                     '%s[%s]: %s' % (self.name, self.work_obj.interval, str(metric_tuple)))
                 self.metrics_queue.put(metric_tuple)
 
+    def join(self, timeout=None):
+        logger.info('Requesting %s die' % (self.name))
+        self.stop_event.set()
+        super(MetricWorkThread, self).join(timeout)
 
     def _teardown(self, ):
         self.work_obj.teardown()
 
 
 class MetricWriter(MetricWorkThread):
+    """ Writer Thread """
 
     def _workload(self, ):
-        self._process_queue()
+        """
+        Loop popping metrics from main queue and sending them
+        to the write_metric method of the work object.  Reading from
+        the queue blocks until an object is retieved.  When None object
+        is popped, read loop ends when the queue is finally empty.
+        """
+        stop_flag = False
+        # Short circuit until stop_flag, then end when queue is empty
+        while not stop_flag or not self.metrics_queue.empty():
+            metric_tpl = self.metrics_queue.get(True)
+            if metric_tpl == None:
+                stop_flag = True
+            else:
+                self.work_obj.write_metric(metric_tpl)
+
+    def join(self, timeout=None):
+        logger.info('Requesting %s die' % (self.name))
+        self.metrics_queue.put(None)
+        super(MetricWorkThread, self).join(timeout)
 
     def _teardown(self, ):
-        logger.info(
-            'Purging Write Queue of %s' % self.metrics_queue.qsize())
-        self._process_queue()
         self.work_obj.teardown()
 
-    def _process_queue(self, ):
-        while not self.metrics_queue.empty():
-            try:
-                metric_tpl = self.metrics_queue.get(True, 0.05)
-                self.work_obj.write_metric(metric_tpl)
-            except Queue.Empty:
-                break
 
 class MetricCollectiveDriver:
 
@@ -396,7 +451,6 @@ class MetricCollectiveDriver:
         except:
             logger.error('READ_MODULES_ENABLED section not found in config file')
             logger.error('EXITING')
-            raise
             sys.exit(-1)
 
         # assemble a list of enabled modules
