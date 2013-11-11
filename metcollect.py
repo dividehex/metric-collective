@@ -251,7 +251,7 @@ class MetricWriteCls_graphite(MetricWorkCls):
 
         try:
             self.hostname = socket.gethostname()
-            self.fqdn = socket.getfqdn(self.hostname)
+            self.fqdn = socket.getfqdn(self.hostname).lower()
         except socket.error:
             logger.error('Could not resolve local fqdn')
             logger.error('EXITING')

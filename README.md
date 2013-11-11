@@ -34,3 +34,15 @@ Edit the metcollect.ini with a text editor:
 Start Metric Collective from the command line or from services.msc:
 
     > metcollect.py start
+
+
+Release Notes
+=============
+
+* [Issue 1](https://github.com/dividehex/metric-collective/issues/1): Convert fqdn to lowercase
+
+
+1.0.0
+-----
+
+* Initial Release
