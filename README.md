@@ -9,9 +9,9 @@ Requirements
 
 Metric Collective requires the following software:
 
-* [Python 2.7.5 for Windows](http://www.python.org/download/releases/2.7.5/)
-* [psutil](http://code.google.com/p/psutil/)
-* [PyWin32](http://sourceforge.net/projects/pywin32/)
+* [Python 2.7.10 for Windows](http://www.python.org/download/releases/2.7.5/)
+* [psutil 3.0.1](http://code.google.com/p/psutil/)
+* [PyWin32 build 219](http://sourceforge.net/projects/pywin32/)
 
 Installation
 ============
@@ -36,13 +36,15 @@ Start Metric Collective from the command line or from services.msc:
     > metcollect.py start
 
 
-Release Notes
-=============
+Compiling to exe
+================
 
-* [Issue 1](https://github.com/dividehex/metric-collective/issues/1): Convert fqdn to lowercase
+metcollect.py can be compiled to a single exe file for easier deployment
+using py2exe
 
+Building metcollect.exe
 
-1.0.0
------
+    > python setup.py py2exe
 
-* Initial Release
+Exe will be in located in the generated __dist__ folder
+
