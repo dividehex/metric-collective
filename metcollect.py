@@ -554,7 +554,6 @@ class AppServerSvc (win32serviceutil.ServiceFramework):
         # check back every 10 mins
         self.timeout = 10*60*1000
         while True:
-            logger.info('--Mark--')
             rc = win32event.WaitForSingleObject(self.hWaitStop, self.timeout)
             if rc == win32event.WAIT_OBJECT_0:
                 break
