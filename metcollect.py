@@ -26,7 +26,7 @@ def initialize_logger():
     try:
         local_log_file = cfg.get('LOG','file')
     except ConfigParser.Error:
-        local_log_file = os.path.join(os.path.dirname(__file__), "metcollect.log")
+        local_log_file = os.path.join(os.path.dirname(sys.argv[0]), "metcollect.log")
     logger = logging.getLogger('metcollect')
 
     try:
@@ -46,7 +46,7 @@ def initialize_logger():
 
 
 def init_config():
-    cfg_file = os.path.join(os.path.dirname(__file__), "metcollect.ini")
+    cfg_file = os.path.join(os.path.dirname(sys.argv[0]), "metcollect.ini")
     cfg = ConfigParser.SafeConfigParser(allow_no_value=True)
     try:
         cfg.readfp(open(cfg_file))
@@ -60,13 +60,15 @@ class MetricWorkCls(object):
     name = None
     interval = 60
     last_poll_time = 0
+    illegal_chars = u' !"#%\'()*+,./:;<=>?@[\]^`{|}~'
 
     def __init__(self, ):
         try:
             self.interval = cfg.getint('MAIN','interval')
         except ConfigParser.Error:
             pass
-        self.conv_tbl = maketrans(' .','__')
+        self.trans_table = dict((ord(char), u'_') for char in self.illegal_chars)
+
 
     def timeToWait(self, ):
         """Returns time to wait for next metric poll"""
@@ -79,9 +81,7 @@ class MetricWorkCls(object):
 
     def sanitize_path(self, path):
         """Sanitize path names to be carbon ready"""
-        path.strip()
-        path = path.translate(self.conv_tbl, '*')
-        return path
+        return path.translate(self.trans_table)
 
     def getName(self, ):
         return self.name
@@ -226,7 +226,7 @@ class MetricReadCls_uptime(MetricWorkCls):
 
     def get_metric(self, ):
         timestamp = time.time()
-        uptime = time.time() - psutil.BOOT_TIME
+        uptime = time.time() - psutil.boot_time()
         prefix = '%s.' % (self.name)
         self.last_poll_time = timestamp
         return [(prefix + 'uptime', uptime, timestamp)]
@@ -522,7 +522,7 @@ class MetricCollectiveDriver:
 
 
 class AppServerSvc (win32serviceutil.ServiceFramework):
-    _svc_name_ = "Metcollective"
+    _svc_name_ = "metcollect"
     _svc_display_name_ = "Metric Collective"
     _svc_description_ = "Collect system metrics and send to Graphite"
 
